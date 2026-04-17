@@ -18,7 +18,7 @@ Installe [Coolify](https://coolify.io) sur un VPS Ubuntu avec un domaine custom 
 ## Utilisation
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/<user>/coolify-setup/main/install.sh | bash -s -- coolify.mondomaine.com
+curl -fsSL https://raw.githubusercontent.com/meissaniang/coolify_ubuntu/main/install.sh | bash -s -- coolify.mondomaine.com
 ```
 
 Remplacer `coolify.mondomaine.com` par ton domaine réel.
@@ -26,7 +26,7 @@ Remplacer `coolify.mondomaine.com` par ton domaine réel.
 Pour télécharger et inspecter avant d'exécuter :
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/<user>/coolify-setup/main/install.sh -o install.sh
+curl -fsSL https://raw.githubusercontent.com/meissaniang/coolify_ubuntu/main/install.sh -o install.sh
 cat install.sh          # vérifier le contenu
 bash install.sh coolify.mondomaine.com
 ```
