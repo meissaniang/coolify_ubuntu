@@ -15,8 +15,8 @@ DOMAIN="${1:-}"
 # Strip protocol if accidentally passed (http://domain.com → domain.com)
 DOMAIN="${DOMAIN#http://}"; DOMAIN="${DOMAIN#https://}"; DOMAIN="${DOMAIN%/}"
 
-# Basic domain format check
-[[ "$DOMAIN" =~ ^[a-zA-Z0-9]([a-zA-Z0-9\-\.]+)?[a-zA-Z0-9]\.[a-zA-Z]{2,}$ ]] \
+# Basic domain format check (contains a dot, no spaces, no protocol)
+[[ "$DOMAIN" == *"."* && "$DOMAIN" != *" "* && "$DOMAIN" != *"/"* ]] \
   || die "Invalid domain: '$DOMAIN'. Example: coolify.example.com"
 
 # ─── ROOT CHECK ───────────────────────────────────────────────────────────────
