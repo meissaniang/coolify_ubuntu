@@ -343,7 +343,8 @@ fi
 echo ""
 
 # Copier la clé dans le container (contourne les permissions du volume)
-docker cp "$SSH_KEY" coolify:/tmp/coolify_local_key 2>/dev/null || true
+# docker cp préserve les permissions root → chmod 644 pour que le process coolify puisse lire
+cat "$SSH_KEY" | docker exec -i coolify sh -c "cat > /tmp/coolify_local_key && chmod 644 /tmp/coolify_local_key" 2>/dev/null || true
 
 docker exec coolify php artisan tinker --execute="
 \$key = App\Models\PrivateKey::updateOrCreate(
