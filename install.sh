@@ -321,6 +321,36 @@ if docker exec coolify curl -sf http://localhost:8080/api/v1/health >/dev/null 2
   ok "Coolify API opérationnelle"
 fi
 
+# ── Correction clé SSH serveur local ──────────────────────────────────────────
+# Le seeder Coolify crée private_key id=1 avec une clé de test hardcodée,
+# mais servers.private_key_id=0 → 500 "getPublicKey() on null".
+# On attend que le seeder ait rempli private_keys, puis on remplace la clé
+# par celle qu'on a générée (déjà dans authorized_keys) et on corrige la FK.
+info "Configuration de la clé SSH pour le serveur local..."
+TIMEOUT=60; ELAPSED=0
+until docker exec coolify-db psql -U coolify -d coolify -tAc \
+  "SELECT COUNT(*) FROM private_keys;" 2>/dev/null | grep -q "^[1-9]"; do
+  sleep 3; ELAPSED=$((ELAPSED + 3))
+  [[ $ELAPSED -ge $TIMEOUT ]] && break
+  echo -n "."
+done
+echo ""
+
+docker exec coolify php artisan tinker --execute="
+\$k = App\Models\PrivateKey::find(1);
+if (\$k) {
+  \$k->private_key = file_get_contents('/data/coolify/ssh/keys/id.root@host.docker.internal');
+  \$k->save();
+  echo 'SSH key updated';
+}
+" 2>/dev/null || true
+
+docker exec coolify-db psql -U coolify -d coolify \
+  -c "UPDATE servers SET private_key_id = 1 WHERE id = 0;" \
+  >/dev/null 2>&1 || true
+
+ok "Clé SSH locale → DB (private_key_id corrigé)"
+
 # ─────────────────────────────────────────────────────────────────────────────
 step "7/7 — Vérifications"
 # ─────────────────────────────────────────────────────────────────────────────
