@@ -284,15 +284,16 @@ ok "Coolify démarré"
 
 # ── Clé SSH pour le serveur local ─────────────────────────────────────────────
 SSH_KEY="${DATA_DIR}/coolify/ssh/keys/id.root@host.docker.internal"
-chmod 700 "${DATA_DIR}/coolify/ssh/keys"
+mkdir -p "${DATA_DIR}/coolify/ssh/keys"
+chmod 755 "${DATA_DIR}/coolify/ssh/keys"
 
 if [[ ! -f "$SSH_KEY" ]]; then
   ssh-keygen -t ed25519 -f "$SSH_KEY" -N "" -C "coolify@local" -q
-  chmod 600 "$SSH_KEY"
   ok "Clé SSH Coolify générée"
 else
   ok "Clé SSH existante conservée"
 fi
+chmod 644 "$SSH_KEY" "${SSH_KEY}.pub"
 
 mkdir -p /root/.ssh && chmod 700 /root/.ssh
 touch /root/.ssh/authorized_keys && chmod 600 /root/.ssh/authorized_keys
@@ -305,9 +306,6 @@ systemctl is-active --quiet ssh 2>/dev/null \
   || systemctl enable --now ssh >/dev/null 2>&1
 
 # ── Attente Coolify health ─────────────────────────────────────────────────────
-# On attend le health endpoint HTTP avant de terminer.
-# NE PAS lancer php artisan manuellement — l'entrypoint gère migrate + seed,
-# un appel concurrent crée des deadlocks sur la migration table.
 info "Attente que Coolify soit opérationnel..."
 TIMEOUT=180; ELAPSED=0
 until docker exec coolify curl -sf http://localhost:8080/api/v1/health >/dev/null 2>&1; do
@@ -322,11 +320,13 @@ if docker exec coolify curl -sf http://localhost:8080/api/v1/health >/dev/null 2
 fi
 
 # ── Correction clé SSH serveur local ──────────────────────────────────────────
-# Le seeder Coolify crée private_key id=1 avec une clé de test hardcodée,
-# mais servers.private_key_id=0 → 500 "getPublicKey() on null".
-# On attend que le seeder ait rempli private_keys, puis on remplace la clé
-# par celle qu'on a générée (déjà dans authorized_keys) et on corrige la FK.
+# Coolify seeder crée private_key id=1 avec une clé de test, mais
+# servers.private_key_id=0 (id inexistant) → 500 "getPublicKey() on null".
+# On attend le seeder, puis on remplace la clé par la nôtre via docker cp
+# (évite les problèmes de permissions sur le volume) et on corrige la FK.
 info "Configuration de la clé SSH pour le serveur local..."
+
+# Attendre que le seeder ait rempli private_keys (max 60s)
 TIMEOUT=60; ELAPSED=0
 until docker exec coolify-db psql -U coolify -d coolify -tAc \
   "SELECT COUNT(*) FROM private_keys;" 2>/dev/null | grep -q "^[1-9]"; do
@@ -334,22 +334,41 @@ until docker exec coolify-db psql -U coolify -d coolify -tAc \
   [[ $ELAPSED -ge $TIMEOUT ]] && break
   echo -n "."
 done
+
+# Si toujours vide, forcer le seeder maintenant (pas de race condition, Coolify est up)
+if ! docker exec coolify-db psql -U coolify -d coolify -tAc \
+  "SELECT COUNT(*) FROM private_keys;" 2>/dev/null | grep -q "^[1-9]"; then
+  docker exec coolify php artisan db:seed --class=PrivateKeySeeder --force 2>/dev/null || true
+fi
 echo ""
 
+# Copier la clé dans le container (contourne les permissions du volume)
+docker cp "$SSH_KEY" coolify:/tmp/coolify_local_key 2>/dev/null || true
+
 docker exec coolify php artisan tinker --execute="
-\$k = App\Models\PrivateKey::find(1);
-if (\$k) {
-  \$k->private_key = file_get_contents('/data/coolify/ssh/keys/id.root@host.docker.internal');
-  \$k->save();
-  echo 'SSH key updated';
-}
+\$key = App\Models\PrivateKey::updateOrCreate(
+  ['uuid' => 'ssh'],
+  [
+    'name'        => 'localhost',
+    'description' => 'SSH key for local server',
+    'private_key' => file_get_contents('/tmp/coolify_local_key'),
+    'team_id'     => 0,
+  ]
+);
+echo 'PrivateKey id=' . \$key->id;
 " 2>/dev/null || true
 
-docker exec coolify-db psql -U coolify -d coolify \
-  -c "UPDATE servers SET private_key_id = 1 WHERE id = 0;" \
-  >/dev/null 2>&1 || true
+PK_ID=$(docker exec coolify-db psql -U coolify -d coolify -tAc \
+  "SELECT id FROM private_keys WHERE uuid='ssh' LIMIT 1;" 2>/dev/null | tr -d ' ')
 
-ok "Clé SSH locale → DB (private_key_id corrigé)"
+if [[ -n "$PK_ID" ]]; then
+  docker exec coolify-db psql -U coolify -d coolify \
+    -c "UPDATE servers SET private_key_id = ${PK_ID} WHERE id = 0;" \
+    >/dev/null 2>&1 || true
+  ok "Clé SSH locale → DB (private_key_id=${PK_ID})"
+else
+  warn "Impossible de corriger private_key_id — vérifier manuellement"
+fi
 
 # ─────────────────────────────────────────────────────────────────────────────
 step "7/7 — Vérifications"
