@@ -111,6 +111,7 @@ cat > "$COMPOSE_FILE" <<'COMPOSE'
 networks:
   coolify-net:
     driver: bridge
+    name: coolify-net
 
 volumes:
   postgres-data:
