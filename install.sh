@@ -105,9 +105,9 @@ set -a; source "$ENV_FILE"; set +a
 # ─────────────────────────────────────────────────────────────────────────────
 step "5/7 — Génération docker-compose.yml"
 # ─────────────────────────────────────────────────────────────────────────────
-# Note: <<'EOF' = pas de substitution bash → ${VAR} sera résolu par docker compose
-# via le fichier .env situé dans le même répertoire (chargement automatique).
-cat > "$COMPOSE_FILE" <<'COMPOSE'
+# <<EOF (sans quotes) = substitution bash directe → valeurs hardcodées dans le fichier généré
+# Les backticks des labels Traefik sont échappés avec \`
+cat > "$COMPOSE_FILE" <<EOF
 networks:
   coolify-net:
     driver: bridge
@@ -119,7 +119,6 @@ volumes:
 
 services:
 
-  # ── Traefik ── reverse proxy, TLS, Let's Encrypt ───────────────────────────
   traefik:
     image: traefik:v3.0
     container_name: traefik
@@ -127,18 +126,14 @@ services:
     command:
       - "--log.level=WARN"
       - "--api.dashboard=false"
-      # Docker provider
       - "--providers.docker=true"
       - "--providers.docker.exposedbydefault=false"
       - "--providers.docker.network=coolify-net"
-      # Entrypoints
       - "--entrypoints.web.address=:80"
       - "--entrypoints.websecure.address=:443"
-      # Redirection globale HTTP → HTTPS
       - "--entrypoints.web.http.redirections.entrypoint.to=websecure"
       - "--entrypoints.web.http.redirections.entrypoint.scheme=https"
       - "--entrypoints.web.http.redirections.entrypoint.permanent=true"
-      # Let's Encrypt via HTTP-01 (compatible Cloudflare proxy)
       - "--certificatesresolvers.letsencrypt.acme.email=admin@${DOMAIN}"
       - "--certificatesresolvers.letsencrypt.acme.storage=/certs/acme.json"
       - "--certificatesresolvers.letsencrypt.acme.httpchallenge=true"
@@ -152,7 +147,6 @@ services:
     networks:
       - coolify-net
 
-  # ── PostgreSQL ─────────────────────────────────────────────────────────────
   coolify-db:
     image: postgres:16-alpine
     container_name: coolify-db
@@ -160,7 +154,7 @@ services:
     environment:
       POSTGRES_DB: coolify
       POSTGRES_USER: coolify
-      POSTGRES_PASSWORD: ${DB_PASSWORD}
+      POSTGRES_PASSWORD: "${DB_PASSWORD}"
     volumes:
       - postgres-data:/var/lib/postgresql/data
     networks:
@@ -172,7 +166,6 @@ services:
       retries: 5
       start_period: 10s
 
-  # ── Redis ──────────────────────────────────────────────────────────────────
   coolify-redis:
     image: redis:7-alpine
     container_name: coolify-redis
@@ -189,9 +182,6 @@ services:
       retries: 5
       start_period: 5s
 
-  # ── Coolify ────────────────────────────────────────────────────────────────
-  # Port 8080 interne uniquement — aucun port exposé sur l'hôte
-  # Tout le trafic passe par Traefik
   coolify:
     image: ghcr.io/coollabsio/coolify:latest
     container_name: coolify
@@ -199,14 +189,14 @@ services:
     environment:
       APP_ENV: production
       APP_DEBUG: "false"
-      APP_KEY: ${APP_KEY}
-      APP_URL: https://${DOMAIN}
+      APP_KEY: "${APP_KEY}"
+      APP_URL: "https://${DOMAIN}"
       DB_CONNECTION: pgsql
       DB_HOST: coolify-db
       DB_PORT: 5432
       DB_DATABASE: coolify
       DB_USERNAME: coolify
-      DB_PASSWORD: ${DB_PASSWORD}
+      DB_PASSWORD: "${DB_PASSWORD}"
       REDIS_HOST: coolify-redis
       REDIS_PORT: 6379
       REDIS_PASSWORD: ""
@@ -226,14 +216,12 @@ services:
       - coolify-net
     labels:
       - "traefik.enable=true"
-      # Routeur HTTPS
-      - "traefik.http.routers.coolify.rule=Host(`${DOMAIN}`)"
+      - "traefik.http.routers.coolify.rule=Host(\`${DOMAIN}\`)"
       - "traefik.http.routers.coolify.entrypoints=websecure"
       - "traefik.http.routers.coolify.tls=true"
       - "traefik.http.routers.coolify.tls.certresolver=letsencrypt"
-      # Service → port interne 8080
       - "traefik.http.services.coolify.loadbalancer.server.port=8080"
-COMPOSE
+EOF
 
 ok "docker-compose.yml généré dans ${INSTALL_DIR}/"
 
