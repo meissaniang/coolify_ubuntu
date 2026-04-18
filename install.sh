@@ -109,10 +109,34 @@ fi
 set -a; source "$ENV_FILE"; set +a
 
 # ─────────────────────────────────────────────────────────────────────────────
-step "5/7 — Génération docker-compose.yml"
+step "5/7 — Génération des fichiers de configuration"
 # ─────────────────────────────────────────────────────────────────────────────
-# <<EOF (sans quotes) = substitution bash directe → valeurs hardcodées dans le fichier généré
-# Les backticks des labels Traefik sont échappés avec \`
+# Traefik utilise le file provider (pas de Docker socket) → zéro problème
+# de version d'API Docker. La route Coolify est dans un fichier YAML statique.
+
+mkdir -p "${DATA_DIR}/traefik/dynamic"
+
+# Config dynamique Traefik : route HTTPS vers Coolify (http://coolify:8080)
+cat > "${DATA_DIR}/traefik/dynamic/coolify.yml" <<EOF
+http:
+  routers:
+    coolify:
+      rule: "Host(\`${DOMAIN}\`)"
+      entrypoints:
+        - websecure
+      tls:
+        certResolver: letsencrypt
+      service: coolify-svc
+
+  services:
+    coolify-svc:
+      loadBalancer:
+        servers:
+          - url: "http://coolify:8080"
+EOF
+
+ok "Config Traefik écrite dans ${DATA_DIR}/traefik/dynamic/coolify.yml"
+
 cat > "$COMPOSE_FILE" <<EOF
 networks:
   coolify-net:
@@ -132,9 +156,9 @@ services:
     command:
       - "--log.level=WARN"
       - "--api.dashboard=false"
-      - "--providers.docker=true"
-      - "--providers.docker.exposedbydefault=false"
-      - "--providers.docker.network=coolify-net"
+      # File provider — pas de Docker socket, pas de problème d'API version
+      - "--providers.file.directory=/etc/traefik/dynamic"
+      - "--providers.file.watch=true"
       - "--entrypoints.web.address=:80"
       - "--entrypoints.websecure.address=:443"
       - "--entrypoints.web.http.redirections.entrypoint.to=websecure"
@@ -148,8 +172,8 @@ services:
       - "80:80"
       - "443:443"
     volumes:
-      - /var/run/docker.sock:/var/run/docker.sock:ro
       - /opt/coolify/data/traefik/acme.json:/certs/acme.json
+      - /opt/coolify/data/traefik/dynamic:/etc/traefik/dynamic:ro
     networks:
       - coolify-net
 
@@ -220,13 +244,6 @@ services:
         condition: service_healthy
     networks:
       - coolify-net
-    labels:
-      - "traefik.enable=true"
-      - "traefik.http.routers.coolify.rule=Host(\`${DOMAIN}\`)"
-      - "traefik.http.routers.coolify.entrypoints=websecure"
-      - "traefik.http.routers.coolify.tls=true"
-      - "traefik.http.routers.coolify.tls.certresolver=letsencrypt"
-      - "traefik.http.services.coolify.loadbalancer.server.port=8080"
 EOF
 
 ok "docker-compose.yml généré dans ${INSTALL_DIR}/"
