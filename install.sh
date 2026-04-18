@@ -216,6 +216,8 @@ services:
     image: ghcr.io/coollabsio/coolify:latest
     container_name: coolify
     restart: unless-stopped
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
     environment:
       APP_ENV: production
       APP_DEBUG: "false"
@@ -277,6 +279,55 @@ ok "PostgreSQL ✓ Redis ✓"
 info "Démarrage de Coolify..."
 docker compose up -d coolify
 ok "Coolify démarré"
+
+# ── Clé SSH pour le serveur local ────────────────────────────────────────────
+# Coolify SSH dans l'hôte via host.docker.internal pour gérer "Local server".
+# La clé doit exister sur le disque ET être dans authorized_keys du root.
+SSH_KEY_DIR="${DATA_DIR}/coolify/ssh/keys"
+SSH_KEY="${SSH_KEY_DIR}/id.root@host.docker.internal"
+mkdir -p "$SSH_KEY_DIR"
+chmod 700 "$SSH_KEY_DIR"
+
+if [[ ! -f "$SSH_KEY" ]]; then
+  info "Génération de la clé SSH Coolify..."
+  ssh-keygen -t ed25519 -f "$SSH_KEY" -N "" -C "coolify@local" -q
+  chmod 600 "$SSH_KEY"
+  ok "Clé SSH générée : ${SSH_KEY}"
+else
+  ok "Clé SSH existante conservée"
+fi
+
+# Ajouter la clé publique dans authorized_keys du root (idempotent)
+mkdir -p /root/.ssh && chmod 700 /root/.ssh
+touch /root/.ssh/authorized_keys && chmod 600 /root/.ssh/authorized_keys
+PUBKEY=$(cat "${SSH_KEY}.pub")
+if ! grep -qF "$PUBKEY" /root/.ssh/authorized_keys; then
+  echo "$PUBKEY" >> /root/.ssh/authorized_keys
+  ok "Clé publique ajoutée dans /root/.ssh/authorized_keys"
+fi
+
+# S'assurer que SSH tourne sur l'hôte
+if ! systemctl is-active --quiet ssh 2>/dev/null && ! systemctl is-active --quiet sshd 2>/dev/null; then
+  apt-get install -y -qq openssh-server >/dev/null 2>&1
+  systemctl enable --now ssh >/dev/null 2>&1
+fi
+
+# Attendre que Coolify soit prêt puis lancer le seeder (crée la PrivateKey en DB)
+info "Attente que Coolify initialise la base de données..."
+TIMEOUT=120; ELAPSED=0
+until docker exec coolify php artisan --version &>/dev/null; do
+  sleep 5; ELAPSED=$((ELAPSED+5))
+  [[ $ELAPSED -ge $TIMEOUT ]] && break
+  echo -n "."
+done
+echo ""
+
+docker exec coolify php artisan migrate --force >/dev/null 2>&1 \
+  && ok "Migrations OK" || warn "Migrations: vérifier les logs"
+
+docker exec coolify php artisan db:seed --force >/dev/null 2>&1 \
+  && ok "Seeding OK (clé SSH instance créée en DB)" \
+  || warn "Seeding: vérifier les logs (peut-être déjà fait)"
 
 # ─────────────────────────────────────────────────────────────────────────────
 step "7/7 — Vérifications"
