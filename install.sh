@@ -19,8 +19,8 @@ DOMAIN="${DOMAIN#http://}"; DOMAIN="${DOMAIN#https://}"; DOMAIN="${DOMAIN%/}"
   || die "Domaine invalide: '$DOMAIN'. Exemple: coolify.mondomaine.com"
 
 # ─── PRÉREQUIS ────────────────────────────────────────────────────────────────
-[[ $EUID -ne 0 ]]                                && die "Exécuter en tant que root"
-grep -qi ubuntu /etc/os-release 2>/dev/null      || die "Ubuntu requis"
+[[ $EUID -ne 0 ]]                           && die "Exécuter en tant que root"
+grep -qi ubuntu /etc/os-release 2>/dev/null || die "Ubuntu requis"
 
 UBUNTU_VERSION=$(grep -oP '(?<=VERSION_ID=")[0-9]+' /etc/os-release 2>/dev/null || echo "0")
 [[ "$UBUNTU_VERSION" -ge 22 ]] || warn "Ubuntu 22+ recommandé (détecté: $UBUNTU_VERSION)"
@@ -30,12 +30,13 @@ INSTALL_DIR="/opt/coolify"
 DATA_DIR="$INSTALL_DIR/data"
 ENV_FILE="$INSTALL_DIR/.env"
 COMPOSE_FILE="$INSTALL_DIR/docker-compose.yml"
-LETSENCRYPT_EMAIL="admin@${DOMAIN}"
+COOLIFY_VERSION="4.0.0-beta.473"
 
 echo ""
 echo -e "${BOLD}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
 echo -e "${BOLD}  Coolify Installer — Traefik + Let's Encrypt${NC}"
-echo -e "${BOLD}  Domaine : ${CYAN}${DOMAIN}${NC}"
+echo -e "${BOLD}  Domaine  : ${CYAN}${DOMAIN}${NC}"
+echo -e "${BOLD}  Version  : ${CYAN}${COOLIFY_VERSION}${NC}"
 echo -e "${BOLD}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -43,8 +44,8 @@ step "1/7 — Paquets système"
 # ─────────────────────────────────────────────────────────────────────────────
 export DEBIAN_FRONTEND=noninteractive
 apt-get update -qq
-apt-get install -y -qq curl wget git ufw ca-certificates gnupg lsb-release
-ok "curl, wget, git, ufw installés"
+apt-get install -y -qq curl wget git ufw ca-certificates gnupg lsb-release openssh-server
+ok "Paquets système installés"
 
 # ─────────────────────────────────────────────────────────────────────────────
 step "2/7 — Firewall (ufw)"
@@ -61,8 +62,7 @@ ok "Règles : 22 (SSH), 80 (HTTP), 443 (HTTPS) — reste bloqué"
 # ─────────────────────────────────────────────────────────────────────────────
 step "3/7 — Docker"
 # ─────────────────────────────────────────────────────────────────────────────
-# Traefik v3 exige Docker API >= 1.40 (Docker Engine >= 19.03).
-# On vérifie la version et on upgrade si nécessaire (get.docker.com est idempotent).
+# Traefik v3 + Docker provider exige Docker API >= 1.40 (Docker Engine >= 19.03)
 DOCKER_API_CURRENT=$(docker version --format '{{.Server.APIVersion}}' 2>/dev/null || echo "0.0")
 DOCKER_API_OK=$(awk -v cur="$DOCKER_API_CURRENT" -v req="1.40" \
   'BEGIN{split(cur,a,"."); split(req,b,"."); print (a[1]>b[1] || (a[1]==b[1] && a[2]>=b[2])) ? "yes" : "no"}')
@@ -84,12 +84,12 @@ step "4/7 — Répertoires & secrets"
 # ─────────────────────────────────────────────────────────────────────────────
 mkdir -p "${DATA_DIR}/traefik" "${DATA_DIR}/coolify"
 
-# acme.json : doit exister avec chmod 600 avant le démarrage de Traefik
 touch "${DATA_DIR}/traefik/acme.json"
 chmod 600 "${DATA_DIR}/traefik/acme.json"
 
-# Génère les secrets une seule fois (idempotent)
+# Secrets générés une seule fois — préservés sur les re-runs
 if [[ ! -f "$ENV_FILE" ]]; then
+  FRESH_INSTALL=true
   APP_KEY="base64:$(openssl rand -base64 32)"
   DB_PASSWORD="$(openssl rand -hex 24)"
   cat > "$ENV_FILE" <<EOF
@@ -98,44 +98,21 @@ DB_PASSWORD=${DB_PASSWORD}
 DOMAIN=${DOMAIN}
 EOF
   chmod 600 "$ENV_FILE"
-  ok "Secrets générés et stockés dans ${ENV_FILE}"
+  ok "Secrets générés → ${ENV_FILE}"
 else
-  # Met à jour le domaine si relancé avec un nouveau domaine
+  FRESH_INSTALL=false
   sed -i "s|^DOMAIN=.*|DOMAIN=${DOMAIN}|" "$ENV_FILE"
   ok "Secrets existants conservés"
 fi
 
-# Charge les variables depuis .env
 set -a; source "$ENV_FILE"; set +a
 
 # ─────────────────────────────────────────────────────────────────────────────
-step "5/7 — Génération des fichiers de configuration"
+step "5/7 — Génération docker-compose.yml"
 # ─────────────────────────────────────────────────────────────────────────────
-# Traefik utilise le file provider (pas de Docker socket) → zéro problème
-# de version d'API Docker. La route Coolify est dans un fichier YAML statique.
-
-mkdir -p "${DATA_DIR}/traefik/dynamic"
-
-# Config dynamique Traefik : route HTTPS vers Coolify (http://coolify:8080)
-cat > "${DATA_DIR}/traefik/dynamic/coolify.yml" <<EOF
-http:
-  routers:
-    coolify:
-      rule: "Host(\`${DOMAIN}\`)"
-      entrypoints:
-        - websecure
-      tls:
-        certResolver: letsencrypt
-      service: coolify-svc
-
-  services:
-    coolify-svc:
-      loadBalancer:
-        servers:
-          - url: "http://coolify:8080"
-EOF
-
-ok "Config Traefik écrite dans ${DATA_DIR}/traefik/dynamic/coolify.yml"
+# Traefik utilise le Docker provider avec DOCKER_API_VERSION=1.41.
+# Docker 29+ a un minimum API de 1.40 ; Traefik négocie nativement en 1.24
+# ce qui est rejeté. La variable force le SDK à utiliser 1.41 directement.
 
 cat > "$COMPOSE_FILE" <<EOF
 networks:
@@ -153,12 +130,15 @@ services:
     image: traefik:v3.0
     container_name: traefik
     restart: unless-stopped
+    environment:
+      # Force Docker SDK API version — Docker 29+ min=1.40, Traefik négocie 1.24 par défaut
+      DOCKER_API_VERSION: "1.41"
     command:
       - "--log.level=WARN"
       - "--api.dashboard=false"
-      # File provider — pas de Docker socket, pas de problème d'API version
-      - "--providers.file.directory=/etc/traefik/dynamic"
-      - "--providers.file.watch=true"
+      - "--providers.docker=true"
+      - "--providers.docker.exposedbydefault=false"
+      - "--providers.docker.network=coolify-net"
       - "--entrypoints.web.address=:80"
       - "--entrypoints.websecure.address=:443"
       - "--entrypoints.web.http.redirections.entrypoint.to=websecure"
@@ -172,8 +152,8 @@ services:
       - "80:80"
       - "443:443"
     volumes:
+      - /var/run/docker.sock:/var/run/docker.sock:ro
       - /opt/coolify/data/traefik/acme.json:/certs/acme.json
-      - /opt/coolify/data/traefik/dynamic:/etc/traefik/dynamic:ro
     networks:
       - coolify-net
 
@@ -213,7 +193,7 @@ services:
       start_period: 5s
 
   coolify:
-    image: ghcr.io/coollabsio/coolify:latest
+    image: ghcr.io/coollabsio/coolify:${COOLIFY_VERSION}
     container_name: coolify
     restart: unless-stopped
     extra_hosts:
@@ -246,17 +226,33 @@ services:
         condition: service_healthy
     networks:
       - coolify-net
+    labels:
+      - "traefik.enable=true"
+      - "traefik.http.routers.coolify.rule=Host(\`${DOMAIN}\`)"
+      - "traefik.http.routers.coolify.entrypoints=websecure"
+      - "traefik.http.routers.coolify.tls=true"
+      - "traefik.http.routers.coolify.tls.certresolver=letsencrypt"
+      - "traefik.http.services.coolify.loadbalancer.server.port=8080"
 EOF
 
-ok "docker-compose.yml généré dans ${INSTALL_DIR}/"
+ok "docker-compose.yml généré → ${COMPOSE_FILE}"
 
 # ─────────────────────────────────────────────────────────────────────────────
 step "6/7 — Démarrage des services"
 # ─────────────────────────────────────────────────────────────────────────────
 cd "$INSTALL_DIR"
 
-info "Pull des images (peut prendre quelques minutes)..."
-docker compose pull -q 2>/dev/null
+# Fresh install : on repart de zéro (volumes inclus) pour éviter un état corrompu
+if [[ "$FRESH_INSTALL" == "true" ]]; then
+  info "Fresh install — nettoyage des volumes existants..."
+  docker compose down -v --remove-orphans 2>/dev/null || true
+else
+  info "Re-run — arrêt des containers (volumes préservés)..."
+  docker compose down --remove-orphans 2>/dev/null || true
+fi
+
+info "Pull des images..."
+docker compose pull || die "Échec du pull des images — vérifier l'accès à ghcr.io"
 
 info "Démarrage de Traefik..."
 docker compose up -d traefik
@@ -265,74 +261,69 @@ ok "Traefik démarré"
 info "Démarrage de PostgreSQL et Redis..."
 docker compose up -d coolify-db coolify-redis
 
-info "Attente de la santé des bases de données..."
+info "Attente santé des bases de données..."
 TIMEOUT=90; ELAPSED=0
 until docker inspect --format='{{.State.Health.Status}}' coolify-db  2>/dev/null | grep -q "healthy" \
    && docker inspect --format='{{.State.Health.Status}}' coolify-redis 2>/dev/null | grep -q "healthy"; do
   sleep 4; ELAPSED=$((ELAPSED + 4))
-  [[ $ELAPSED -ge $TIMEOUT ]] && die "Timeout: bases de données non prêtes après ${TIMEOUT}s\nVérifier: docker compose -f ${COMPOSE_FILE} logs coolify-db coolify-redis"
+  [[ $ELAPSED -ge $TIMEOUT ]] && die "Timeout DB/Redis après ${TIMEOUT}s\nLogs: docker compose -f ${COMPOSE_FILE} logs coolify-db"
   echo -n "."
 done
 echo ""
-ok "PostgreSQL ✓ Redis ✓"
+ok "PostgreSQL ✓  Redis ✓"
 
 info "Démarrage de Coolify..."
 docker compose up -d coolify
 ok "Coolify démarré"
 
-# ── Clé SSH pour le serveur local ────────────────────────────────────────────
-# Coolify SSH dans l'hôte via host.docker.internal pour gérer "Local server".
-# La clé doit exister sur le disque ET être dans authorized_keys du root.
+# ── Clé SSH pour le serveur local ─────────────────────────────────────────────
+# Coolify SSH vers l'hôte via host.docker.internal pour le "Local server"
 SSH_KEY_DIR="${DATA_DIR}/coolify/ssh/keys"
 SSH_KEY="${SSH_KEY_DIR}/id.root@host.docker.internal"
-mkdir -p "$SSH_KEY_DIR"
-chmod 700 "$SSH_KEY_DIR"
+mkdir -p "$SSH_KEY_DIR" && chmod 700 "$SSH_KEY_DIR"
 
 if [[ ! -f "$SSH_KEY" ]]; then
-  info "Génération de la clé SSH Coolify..."
   ssh-keygen -t ed25519 -f "$SSH_KEY" -N "" -C "coolify@local" -q
   chmod 600 "$SSH_KEY"
-  ok "Clé SSH générée : ${SSH_KEY}"
+  ok "Clé SSH Coolify générée"
 else
   ok "Clé SSH existante conservée"
 fi
 
-# Ajouter la clé publique dans authorized_keys du root (idempotent)
 mkdir -p /root/.ssh && chmod 700 /root/.ssh
 touch /root/.ssh/authorized_keys && chmod 600 /root/.ssh/authorized_keys
 PUBKEY=$(cat "${SSH_KEY}.pub")
 if ! grep -qF "$PUBKEY" /root/.ssh/authorized_keys; then
   echo "$PUBKEY" >> /root/.ssh/authorized_keys
-  ok "Clé publique ajoutée dans /root/.ssh/authorized_keys"
+  ok "Clé publique → /root/.ssh/authorized_keys"
 fi
 
-# S'assurer que SSH tourne sur l'hôte
-if ! systemctl is-active --quiet ssh 2>/dev/null && ! systemctl is-active --quiet sshd 2>/dev/null; then
-  apt-get install -y -qq openssh-server >/dev/null 2>&1
+systemctl is-active --quiet ssh 2>/dev/null || \
+  systemctl is-active --quiet sshd 2>/dev/null || \
   systemctl enable --now ssh >/dev/null 2>&1
-fi
 
-# Attendre que Coolify soit prêt puis lancer le seeder (crée la PrivateKey en DB)
-info "Attente que Coolify initialise la base de données..."
+# ── Initialisation DB ─────────────────────────────────────────────────────────
+info "Attente que Coolify soit prêt (artisan)..."
 TIMEOUT=120; ELAPSED=0
 until docker exec coolify php artisan --version &>/dev/null; do
   sleep 5; ELAPSED=$((ELAPSED+5))
-  [[ $ELAPSED -ge $TIMEOUT ]] && break
+  [[ $ELAPSED -ge $TIMEOUT ]] && { warn "Coolify pas encore prêt — migrations skippées"; break; }
   echo -n "."
 done
 echo ""
 
-docker exec coolify php artisan migrate --force >/dev/null 2>&1 \
-  && ok "Migrations OK" || warn "Migrations: vérifier les logs"
-
-docker exec coolify php artisan db:seed --force >/dev/null 2>&1 \
-  && ok "Seeding OK (clé SSH instance créée en DB)" \
-  || warn "Seeding: vérifier les logs (peut-être déjà fait)"
+if docker exec coolify php artisan --version &>/dev/null; then
+  docker exec coolify php artisan migrate --force >/dev/null 2>&1 \
+    && ok "Migrations OK" || warn "Migrations: erreur (voir: docker logs coolify)"
+  docker exec coolify php artisan db:seed --force >/dev/null 2>&1 \
+    && ok "Seeding OK — PrivateKey instance créée en DB" \
+    || warn "Seeding: déjà effectué ou erreur (voir: docker logs coolify)"
+fi
 
 # ─────────────────────────────────────────────────────────────────────────────
 step "7/7 — Vérifications"
 # ─────────────────────────────────────────────────────────────────────────────
-info "Vérification des conteneurs..."
+info "Conteneurs..."
 FAILURES=()
 for SVC in traefik coolify-db coolify-redis coolify; do
   STATUS=$(docker inspect --format='{{.State.Status}}' "$SVC" 2>/dev/null || echo "missing")
@@ -343,24 +334,27 @@ for SVC in traefik coolify-db coolify-redis coolify; do
     warn "$SVC → $STATUS"
   fi
 done
-
 [[ ${#FAILURES[@]} -eq 0 ]] \
   || die "Services en échec : ${FAILURES[*]}\nLogs: docker compose -f ${COMPOSE_FILE} logs"
 
-# Let's Encrypt a besoin que Traefik soit accessible sur le port 80
-# Le certificat est émis lors du premier hit HTTPS — on attend quelques secondes
-info "Attente de l'émission du certificat Let's Encrypt..."
-sleep 20
+info "Traefik — vérification Docker provider..."
+sleep 8
+TRAEFIK_ERR=$(docker logs traefik 2>&1 | grep -c "client version.*too old" || true)
+if [[ "$TRAEFIK_ERR" -eq 0 ]]; then
+  ok "Traefik Docker provider actif"
+else
+  warn "Traefik Docker provider : erreur API version détectée — vérifier: docker logs traefik"
+fi
 
+info "Test HTTPS..."
+sleep 15
 HTTPS_CODE=$(curl -o /dev/null -sf -w "%{http_code}" \
-  --max-time 15 --connect-timeout 10 \
-  "https://${DOMAIN}" 2>/dev/null || echo "000")
+  --max-time 15 --connect-timeout 10 "https://${DOMAIN}" 2>/dev/null || echo "000")
 
 if [[ "$HTTPS_CODE" =~ ^(200|302|301|307|308)$ ]]; then
   ok "HTTPS actif (HTTP ${HTTPS_CODE})"
 else
-  warn "HTTPS pas encore prêt (code: ${HTTPS_CODE}) — le certificat peut prendre 1-2 minutes"
-  info "Vérifier dans quelques instants: curl -I https://${DOMAIN}"
+  warn "HTTPS pas encore prêt (code: ${HTTPS_CODE}) — Let's Encrypt peut prendre 1-2 min"
 fi
 
 SERVER_IP=$(curl -sf --max-time 5 https://api.ipify.org 2>/dev/null \
@@ -370,20 +364,20 @@ SERVER_IP=$(curl -sf --max-time 5 https://api.ipify.org 2>/dev/null \
 # ─── SUCCÈS ───────────────────────────────────────────────────────────────────
 echo ""
 echo -e "${BOLD}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
-echo -e "  ${GREEN}${BOLD}Installation terminée avec succès !${NC}"
+echo -e "  ${GREEN}${BOLD}Installation terminée !${NC}"
 echo -e "${BOLD}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
 echo ""
-echo -e "  ${CYAN}URL Coolify :${NC}   https://${DOMAIN}"
-echo -e "  ${CYAN}IP serveur :${NC}    ${SERVER_IP}"
-echo -e "  ${CYAN}Fichiers :${NC}      ${INSTALL_DIR}/"
-echo -e "  ${CYAN}Certificats :${NC}   ${DATA_DIR}/traefik/acme.json"
+echo -e "  ${CYAN}URL     :${NC}  https://${DOMAIN}"
+echo -e "  ${CYAN}IP      :${NC}  ${SERVER_IP}"
+echo -e "  ${CYAN}Version :${NC}  Coolify ${COOLIFY_VERSION}"
+echo -e "  ${CYAN}Fichiers:${NC}  ${INSTALL_DIR}/"
 echo ""
-echo -e "  ${YELLOW}Cloudflare :${NC} SSL/TLS → mode ${BOLD}Full${NC} ou ${BOLD}Full (strict)${NC}"
+echo -e "  ${YELLOW}Cloudflare SSL/TLS :${NC} Full ou Full (strict)"
 echo ""
 echo -e "  ${GREEN}${BOLD}Coolify est disponible sur https://${DOMAIN}${NC}"
 echo ""
 echo "  Commandes utiles :"
 echo "    docker compose -f ${COMPOSE_FILE} ps"
 echo "    docker compose -f ${COMPOSE_FILE} logs -f coolify"
-echo "    docker compose -f ${COMPOSE_FILE} restart"
+echo "    docker compose -f ${COMPOSE_FILE} logs -f traefik"
 echo ""
