@@ -260,6 +260,10 @@ fi
 info "Pull des images..."
 docker compose pull || die "Échec pull images — vérifier l'accès à ghcr.io et docker.io"
 
+# Réseau requis par Coolify pour déployer les applications
+docker network create --driver bridge coolify 2>/dev/null || true
+ok "Réseau Docker 'coolify' disponible"
+
 info "Démarrage de Traefik..."
 docker compose up -d traefik
 ok "Traefik démarré (file provider)"
