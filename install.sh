@@ -61,13 +61,19 @@ ok "Règles : 22 (SSH), 80 (HTTP), 443 (HTTPS) — reste bloqué"
 # ─────────────────────────────────────────────────────────────────────────────
 step "3/7 — Docker"
 # ─────────────────────────────────────────────────────────────────────────────
-if ! command -v docker &>/dev/null; then
-  info "Installation de Docker..."
+# Traefik v3 exige Docker API >= 1.40 (Docker Engine >= 19.03).
+# On vérifie la version et on upgrade si nécessaire (get.docker.com est idempotent).
+DOCKER_API_CURRENT=$(docker version --format '{{.Server.APIVersion}}' 2>/dev/null || echo "0.0")
+DOCKER_API_OK=$(awk -v cur="$DOCKER_API_CURRENT" -v req="1.40" \
+  'BEGIN{split(cur,a,"."); split(req,b,"."); print (a[1]>b[1] || (a[1]==b[1] && a[2]>=b[2])) ? "yes" : "no"}')
+
+if ! command -v docker &>/dev/null || [[ "$DOCKER_API_OK" == "no" ]]; then
+  info "Installation/mise à jour de Docker (API actuelle: ${DOCKER_API_CURRENT}, requise: >=1.40)..."
   curl -fsSL https://get.docker.com | sh >/dev/null 2>&1
   systemctl enable docker --now >/dev/null 2>&1
-  ok "Docker installé ($(docker --version | awk '{print $3}' | tr -d ','))"
+  ok "Docker installé/mis à jour ($(docker --version | awk '{print $3}' | tr -d ','))"
 else
-  ok "Docker présent ($(docker --version | awk '{print $3}' | tr -d ','))"
+  ok "Docker OK — API ${DOCKER_API_CURRENT} ($(docker --version | awk '{print $3}' | tr -d ','))"
 fi
 
 docker compose version &>/dev/null || die "Docker Compose v2 introuvable"
@@ -123,8 +129,6 @@ services:
     image: traefik:v3.0
     container_name: traefik
     restart: unless-stopped
-    environment:
-      - DOCKER_API_VERSION=1.41
     command:
       - "--log.level=WARN"
       - "--api.dashboard=false"
