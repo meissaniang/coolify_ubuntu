@@ -106,11 +106,33 @@ fi
 
 ok "Domain configured in $COOLIFY_ENV"
 
+# ─── CADDY PROXY CONFIG ───────────────────────────────────────────────────────
+# Coolify app runs on internal port 8000.
+# Caddy (coolify-proxy) listens on port 80 and routes domain → coolify:8000.
+# We write the route explicitly so it works without going through the Coolify UI.
+CADDY_DYNAMIC_DIR="/data/coolify/proxy/dynamic"
+mkdir -p "$CADDY_DYNAMIC_DIR"
+
+cat > "${CADDY_DYNAMIC_DIR}/coolify-dashboard.caddy" <<CADDY
+http://${DOMAIN} {
+    reverse_proxy coolify:8000
+}
+CADDY
+
+ok "Caddy route written: ${DOMAIN}:80 → coolify:8000"
+
 # ─── RESTART COOLIFY ──────────────────────────────────────────────────────────
 info "Starting Coolify services..."
 docker compose pull -q 2>/dev/null || true
 docker compose up -d --force-recreate --remove-orphans >/dev/null 2>&1
 ok "Coolify services started"
+
+# Give Caddy time to start, then reload its config to pick up the new route
+info "Reloading Caddy proxy config..."
+sleep 8
+docker exec coolify-proxy caddy reload --config /etc/caddy/Caddyfile 2>/dev/null \
+  || docker restart coolify-proxy >/dev/null 2>&1 || true
+ok "Caddy proxy reloaded"
 
 # ─── HEALTH CHECK ─────────────────────────────────────────────────────────────
 info "Waiting for Coolify to be healthy..."
