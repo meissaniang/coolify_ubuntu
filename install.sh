@@ -123,6 +123,8 @@ services:
     image: traefik:v3.0
     container_name: traefik
     restart: unless-stopped
+    environment:
+      - DOCKER_API_VERSION=1.41
     command:
       - "--log.level=WARN"
       - "--api.dashboard=false"
