@@ -10,7 +10,7 @@ die()  { echo -e "${RED}✗${NC} $*" >&2; exit 1; }
 
 # ─── USAGE ────────────────────────────────────────────────────────────────────
 DOMAIN="${1:-}"
-[[ -z "$DOMAIN" ]] && die "Usage: curl -fsSL https://raw.githubusercontent.com/<user>/coolify-setup/main/install.sh | bash -s -- yourdomain.com"
+[[ -z "$DOMAIN" ]] && die "Usage: curl -fsSL https://raw.githubusercontent.com/meissaniang/coolify_ubuntu/main/install.sh | bash -s -- yourdomain.com"
 
 # Strip protocol if accidentally passed (http://domain.com → domain.com)
 DOMAIN="${DOMAIN#http://}"; DOMAIN="${DOMAIN#https://}"; DOMAIN="${DOMAIN%/}"
@@ -31,6 +31,7 @@ UBUNTU_VERSION=$(grep -oP '(?<=VERSION_ID=")[0-9]+' /etc/os-release)
 echo ""
 echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
 echo "  Coolify Installer — domain: ${DOMAIN}"
+echo "  Mode: HTTP port 80 (SSL géré par Cloudflare)"
 echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
 echo ""
 
@@ -47,11 +48,11 @@ info "Configuring firewall (ufw)..."
 ufw --force reset >/dev/null 2>&1
 ufw default deny incoming >/dev/null
 ufw default allow outgoing >/dev/null
-ufw allow 22/tcp   comment 'SSH'   >/dev/null
-ufw allow 80/tcp   comment 'HTTP'  >/dev/null
-ufw allow 443/tcp  comment 'HTTPS' >/dev/null
+ufw allow 22/tcp  comment 'SSH'  >/dev/null
+ufw allow 80/tcp  comment 'HTTP' >/dev/null
+# Port 443 not needed — Cloudflare Flexible mode connects on port 80 only
 ufw --force enable >/dev/null
-ok "Firewall configured (22, 80, 443 open)"
+ok "Firewall configured (22, 80 open)"
 
 # ─── DOCKER ───────────────────────────────────────────────────────────────────
 if ! command -v docker &>/dev/null; then
@@ -73,7 +74,7 @@ ok "Coolify installation script completed"
 COOLIFY_ENV="/data/coolify/source/.env"
 COOLIFY_DIR="/data/coolify/source"
 
-info "Waiting for Coolify to initialize..."
+info "Waiting for Coolify env file..."
 TIMEOUT=60
 ELAPSED=0
 until [[ -f "$COOLIFY_ENV" ]] || [[ $ELAPSED -ge $TIMEOUT ]]; do
@@ -83,25 +84,24 @@ done
 
 [[ -f "$COOLIFY_ENV" ]] || die "Coolify env file not found at $COOLIFY_ENV after ${TIMEOUT}s. Check: docker ps"
 
-# ─── CONFIGURE DOMAIN ─────────────────────────────────────────────────────────
-info "Configuring domain: $DOMAIN..."
+# ─── CONFIGURE DOMAIN (HTTP only — Cloudflare Flexible SSL) ───────────────────
+info "Configuring domain: http://${DOMAIN} (port 80, no SSL on server)..."
 
-# Stop services before editing env to avoid race conditions
 cd "$COOLIFY_DIR"
 docker compose stop >/dev/null 2>&1 || true
 
-# Set APP_FQDN (format: domain.com — no protocol, Coolify/Caddy handles https)
+# APP_FQDN with http:// prefix → Caddy does NOT attempt Let's Encrypt
+# and does NOT redirect HTTP→HTTPS — Cloudflare handles SSL for end users
 if grep -q "^APP_FQDN=" "$COOLIFY_ENV"; then
-  sed -i "s|^APP_FQDN=.*|APP_FQDN=${DOMAIN}|" "$COOLIFY_ENV"
+  sed -i "s|^APP_FQDN=.*|APP_FQDN=http://${DOMAIN}|" "$COOLIFY_ENV"
 else
-  echo "APP_FQDN=${DOMAIN}" >> "$COOLIFY_ENV"
+  echo "APP_FQDN=http://${DOMAIN}" >> "$COOLIFY_ENV"
 fi
 
-# Ensure APP_URL is consistent
 if grep -q "^APP_URL=" "$COOLIFY_ENV"; then
-  sed -i "s|^APP_URL=.*|APP_URL=https://${DOMAIN}|" "$COOLIFY_ENV"
+  sed -i "s|^APP_URL=.*|APP_URL=http://${DOMAIN}|" "$COOLIFY_ENV"
 else
-  echo "APP_URL=https://${DOMAIN}" >> "$COOLIFY_ENV"
+  echo "APP_URL=http://${DOMAIN}" >> "$COOLIFY_ENV"
 fi
 
 ok "Domain configured in $COOLIFY_ENV"
@@ -138,18 +138,20 @@ echo "━━━━━━━━━━━━━━━━━━━━━━━━�
 echo -e "  ${GREEN}Installation complete!${NC}"
 echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
 echo ""
-echo -e "  ${CYAN}Coolify URL:${NC}  https://${DOMAIN}"
+echo -e "  ${CYAN}Coolify URL:${NC}  https://${DOMAIN}  (via Cloudflare)"
 echo -e "  ${CYAN}Server IP:${NC}   ${SERVER_IP}"
 echo ""
 echo "  Cloudflare checklist:"
-echo "  ┌─────────────────────────────────────────────────┐"
-echo "  │ DNS  → A record: ${DOMAIN}"
-echo "  │          pointing to ${SERVER_IP} (proxied ☁)  │"
-echo "  │ SSL  → SSL/TLS mode: Full                       │"
-echo "  │        (Cloudflare handles HTTPS for users)     │"
-echo "  │ Note → Let's Encrypt cert is auto-issued        │"
-echo "  │        by Coolify's Caddy through Cloudflare    │"
-echo "  └─────────────────────────────────────────────────┘"
+echo "  ┌─────────────────────────────────────────────────────┐"
+echo "  │ DNS → A  ${DOMAIN}"
+echo "  │          → ${SERVER_IP}  (proxy ☁ activé)          │"
+echo "  │                                                     │"
+echo "  │ SSL/TLS → Mode: Flexible                            │"
+echo "  │   Cloudflare ──HTTPS──► vous                       │"
+echo "  │   Cloudflare ──HTTP──►  serveur port 80            │"
+echo "  │                                                     │"
+echo "  │ Apps déployées: même config — A record + Flexible   │"
+echo "  └─────────────────────────────────────────────────────┘"
 echo ""
 echo "  First visit → https://${DOMAIN} → create your admin account"
 echo ""
