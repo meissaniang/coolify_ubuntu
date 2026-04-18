@@ -342,9 +342,8 @@ if ! docker exec coolify-db psql -U coolify -d coolify -tAc \
 fi
 echo ""
 
-# Copier la clé dans le container (contourne les permissions du volume)
-# docker cp préserve les permissions root → chmod 644 pour que le process coolify puisse lire
-cat "$SSH_KEY" | docker exec -i coolify sh -c "cat > /tmp/coolify_local_key && chmod 644 /tmp/coolify_local_key" 2>/dev/null || true
+# Passer la clé en base64 inline — pas de fichier temporaire, pas de problème de permissions
+SSH_KEY_B64=$(base64 -w0 "$SSH_KEY")
 
 docker exec coolify php artisan tinker --execute="
 \$key = App\Models\PrivateKey::updateOrCreate(
@@ -352,7 +351,7 @@ docker exec coolify php artisan tinker --execute="
   [
     'name'        => 'localhost',
     'description' => 'SSH key for local server',
-    'private_key' => file_get_contents('/tmp/coolify_local_key'),
+    'private_key' => base64_decode('${SSH_KEY_B64}'),
     'team_id'     => 0,
   ]
 );
