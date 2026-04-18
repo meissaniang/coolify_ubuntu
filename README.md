@@ -1,17 +1,18 @@
 # Coolify One-Line Installer
 
-Installe [Coolify](https://coolify.io) sur un VPS Ubuntu avec un domaine custom géré par Cloudflare — en une seule commande.
+Déploie [Coolify](https://coolify.io) en production sur un VPS Ubuntu avec **Traefik** comme reverse proxy, **Let's Encrypt** automatique et **Cloudflare** comme CDN/SSL — en une seule commande.
 
 ## Prérequis
 
 | Quoi | Détail |
 |---|---|
 | VPS | Ubuntu 22.04+ (fresh), accès root |
+| RAM / CPU | 2 vCPU, 2 GB RAM minimum |
+| Disque | 20 GB minimum |
 | Domaine | Enregistré dans Cloudflare |
 | DNS Cloudflare | Record `A` → IP du VPS, **proxy activé (☁ orange)** |
-| Ports ouverts | 22, 80, 443 |
 
-> Le script **ne touche pas** Cloudflare. Le DNS doit être configuré manuellement avant de lancer l'install.
+> Le script **ne touche pas** Cloudflare. Le DNS doit être configuré avant de lancer l'install.
 
 ---
 
@@ -21,59 +22,104 @@ Installe [Coolify](https://coolify.io) sur un VPS Ubuntu avec un domaine custom 
 curl -fsSL https://raw.githubusercontent.com/meissaniang/coolify_ubuntu/main/install.sh | bash -s -- coolify.mondomaine.com
 ```
 
-Remplacer `coolify.mondomaine.com` par ton domaine réel.
-
-Pour télécharger et inspecter avant d'exécuter :
+Pour inspecter le script avant exécution :
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/meissaniang/coolify_ubuntu/main/install.sh -o install.sh
-cat install.sh          # vérifier le contenu
+cat install.sh
 bash install.sh coolify.mondomaine.com
 ```
+
+---
+
+## Architecture déployée
+
+```
+Internet
+   │
+   │ HTTPS
+   ▼
+Cloudflare (proxy ☁)
+   │
+   │ HTTPS
+   ▼
+VPS — Traefik :443 / :80
+         │
+         │ HTTP interne
+         ▼
+      coolify:8080  ← jamais exposé sur l'hôte
+```
+
+### Stack Docker
+
+| Service | Image | Port hôte |
+|---|---|---|
+| Traefik | `traefik:v3.0` | 80, 443 |
+| PostgreSQL | `postgres:16-alpine` | aucun |
+| Redis | `redis:7-alpine` | aucun |
+| Coolify | `ghcr.io/coollabsio/coolify:latest` | **aucun** |
 
 ---
 
 ## Ce que fait le script
 
 ```
-1. Update du système (apt)
-2. Configuration firewall (ufw) → 22, 80, 443
-3. Installation Docker (si absent)
-4. Installation Coolify via l'installeur officiel
-5. Configuration du domaine dans /data/coolify/source/.env
-6. Restart des services Coolify
-7. Health check de l'API
+1. Vérification du domaine, root et OS
+2. Installation des paquets système (curl, git, ufw...)
+3. Configuration firewall UFW → 22, 80, 443 (reste bloqué)
+4. Installation Docker + Docker Compose v2
+5. Création de /opt/coolify/ avec répertoires de données
+6. Génération des secrets (APP_KEY, DB_PASSWORD) → /opt/coolify/.env
+7. Génération du docker-compose.yml avec le domaine injecté
+8. Pull et démarrage des services (Traefik → DB/Redis → Coolify)
+9. Health checks PostgreSQL et Redis
+10. Vérification HTTPS finale
+```
+
+### Fichiers créés sur le VPS
+
+```
+/opt/coolify/
+├── .env                        ← secrets (APP_KEY, DB_PASSWORD) — chmod 600
+├── docker-compose.yml
+└── data/
+    ├── traefik/
+    │   └── acme.json           ← certificats Let's Encrypt — chmod 600
+    └── coolify/                ← données persistantes Coolify
 ```
 
 ---
 
 ## Configuration Cloudflare
 
-Après l'install, configurer dans le dashboard Cloudflare :
+### DNS (avant l'install)
 
-### DNS
 | Type | Nom | Valeur | Proxy |
 |---|---|---|---|
 | A | `coolify.mondomaine.com` | IP du VPS | ☁ Activé |
 
-### SSL/TLS
-- Aller dans **SSL/TLS → Overview**
-- Choisir le mode **Full** (pas Flexible, pas Full (strict))
+### SSL/TLS (après l'install)
 
-> **Pourquoi "Full" ?**  
-> - Flexible → Cloudflare fait du HTTP vers ton serveur (non sécurisé)  
-> - Full → Cloudflare fait du HTTPS vers ton serveur (accepte le cert Let's Encrypt de Coolify)  
-> - Full (strict) → Exige un cert signé par une CA reconnue (Let's Encrypt via HTTP-01 fonctionne aussi)
+Aller dans **SSL/TLS → Overview** et choisir :
 
-### Comment le SSL fonctionne
+**Full** ou **Full (strict)**
+
+| Mode | Comportement | Recommandé |
+|---|---|---|
+| Flexible | CF → HTTP → serveur | ✗ Non sécurisé |
+| Full | CF → HTTPS → serveur (cert auto-signé OK) | ✓ |
+| Full (strict) | CF → HTTPS → serveur (cert CA valide requis) | ✓ Let's Encrypt valide |
+
+### Comment fonctionne le SSL
+
 ```
-Utilisateur ──HTTPS──► Cloudflare ──HTTPS──► VPS (Coolify/Caddy)
-                         ↑
-                   Cert Cloudflare          Cert Let's Encrypt
-                   (géré par CF)            (auto via Caddy)
+Utilisateur ──HTTPS──► Cloudflare ──HTTPS──► Traefik ──HTTP──► Coolify:8080
+                           ↑                     ↑
+                     Cert Cloudflare       Cert Let's Encrypt
+                     (géré par CF)         (auto via HTTP-01)
 ```
 
-Caddy (proxy interne de Coolify) obtient automatiquement un certificat Let's Encrypt via HTTP-01. Cloudflare proxifie la validation → ça fonctionne même derrière le proxy Cloudflare.
+Traefik obtient automatiquement un certificat Let's Encrypt via **HTTP-01**. La validation passe à travers Cloudflare (port 80 proxifié) → fonctionne nativement.
 
 ---
 
@@ -81,47 +127,64 @@ Caddy (proxy interne de Coolify) obtient automatiquement un certificat Let's Enc
 
 1. Ouvrir `https://coolify.mondomaine.com`
 2. Créer le compte administrateur
-3. Coolify est prêt — il gère seul :
-   - Le déploiement des apps
-   - Les domaines custom des apps (sous-domaines via Cloudflare)
-   - Les certificats SSL des apps déployées
-   - Les bases de données, services, etc.
+3. Coolify est opérationnel — il gère :
+   - Le déploiement des apps (Docker, Git, etc.)
+   - Les domaines et certificats des apps déployées
+   - Les bases de données et services
+   - Les environnements et variables
 
 ---
 
 ## Déployer une app via Coolify
 
-Chaque app déployée sur Coolify peut avoir son propre sous-domaine :
+Pour chaque app avec son propre sous-domaine :
 
 1. Créer un record DNS dans Cloudflare : `A` → `app1.mondomaine.com` → IP du VPS (☁ proxy)
 2. Dans Coolify : ajouter le domaine `https://app1.mondomaine.com` à l'app
-3. Coolify/Caddy gère le routing et le SSL automatiquement
+3. Coolify configure le routing automatiquement
+
+---
+
+## Commandes utiles
+
+```bash
+# État des services
+docker compose -f /opt/coolify/docker-compose.yml ps
+
+# Logs en temps réel
+docker compose -f /opt/coolify/docker-compose.yml logs -f coolify
+docker compose -f /opt/coolify/docker-compose.yml logs -f traefik
+
+# Redémarrer
+docker compose -f /opt/coolify/docker-compose.yml restart
+
+# Mettre à jour Coolify
+docker compose -f /opt/coolify/docker-compose.yml pull coolify
+docker compose -f /opt/coolify/docker-compose.yml up -d coolify
+```
 
 ---
 
 ## Résolution de problèmes
 
-**Coolify inaccessible après l'install**
+**Services non démarrés**
 ```bash
-# Vérifier que les containers tournent
-docker ps
-
-# Voir les logs Coolify
-docker logs coolify
-
-# Relancer manuellement
-cd /data/coolify/source && docker compose up -d
+docker compose -f /opt/coolify/docker-compose.yml ps
+docker compose -f /opt/coolify/docker-compose.yml logs
 ```
 
-**Let's Encrypt rate limit / cert non obtenu**
+**Certificat Let's Encrypt non émis**
 ```bash
-# Vérifier les logs Caddy
-docker logs coolify-proxy
+# Vérifier les logs Traefik
+docker logs traefik 2>&1 | grep -i "acme\|cert\|error"
+
+# Vérifier que le port 80 est accessible depuis l'extérieur
+curl -I http://coolify.mondomaine.com
 ```
 
-**Vérifier la config du domaine**
+**Relancer depuis zéro (idempotent)**
 ```bash
-cat /data/coolify/source/.env | grep -E "APP_FQDN|APP_URL"
+curl -fsSL https://raw.githubusercontent.com/meissaniang/coolify_ubuntu/main/install.sh | bash -s -- coolify.mondomaine.com
 ```
 
 ---
@@ -134,5 +197,3 @@ cat /data/coolify/source/.env | grep -E "APP_FQDN|APP_URL"
 | Ubuntu 24.04 LTS | ✓ |
 | Ubuntu 20.04 LTS | ✓ (non testé) |
 | Debian / autres | ✗ |
-
-Minimum recommandé : 2 vCPU, 2 GB RAM, 20 GB disque.
